@@ -30,7 +30,6 @@ void setup()
 {
   Serial.begin(115200);
   Wire.begin(D2, D1);
-
   tempSensor.begin();
 
   writeReg(MMA8452_ADDR, 0x2A, 0x00);
@@ -61,9 +60,11 @@ void loop()
   Wire.endTransmission(false);
   Wire.requestFrom(MMA8452_ADDR, 6);
 
-  int ax = (Wire.read() << 8 | Wire.read()) >> 4;
-  int ay = (Wire.read() << 8 | Wire.read()) >> 4;
   int az = (Wire.read() << 8 | Wire.read()) >> 4;
+  Wire.read();
+  Wire.read();
+  Wire.read();
+  Wire.read();
 
   Wire.beginTransmission(HMC5883_ADDR);
   Wire.write(0x03);
@@ -73,12 +74,13 @@ void loop()
   int mx = Wire.read() << 8 | Wire.read();
   Wire.read();
   Wire.read();
-  int my = Wire.read() << 8 | Wire.read();
+  Wire.read();
+  Wire.read();
 
   char payload[256];
   snprintf(payload, sizeof(payload),
-           "{\"temp\":%.2f,\"ax\":%d,\"ay\":%d,\"az\":%d,\"mx\":%d,\"my\":%d}",
-           temp, ax, ay, az, mx, my);
+           "{\"temp\":%.2f,\"az\":%d,\"mx\":%d}",
+           temp, az, mx);
 
   client.publish("eletromecanica/motor/raw", payload);
   delay(5); // 200Hz
