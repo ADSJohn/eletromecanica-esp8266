@@ -1,97 +1,119 @@
 #include <Arduino.h>
+#include <Wire.h>
 #include <ESP8266WiFi.h>
 #include <PubSubClient.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
 
-const char *rede_wifi = "nome da sua rede wifi;
-    const char *senha = "senha do wifi";
+const char *ssid = "";
+const char *password = "";
 
-const char *mosquitto_broker = "IP aonde esta rodando o mosquitto;
-    const int mosquitto_port = 1883;
-const char *topico = "temperatura/topic";
-const char *clientId = "ESP8266_Temp_01";
+const char *mqtt_server = "broker.hivemq.com";
+const int mqtt_port = 1883;
 
-WiFiClient esp8266Cliente;
-PubSubClient cliente(esp8266Cliente);
+const char *topicSensores = "eletromecanica/motor/sensores";
+const char *topicStatus = "eletromecanica/motor/status";
 
-void callback(char *topic, byte *payload, unsigned int length)
+#define MMA8452_ADDR 0x1C
+#define ONE_WIRE_BUS D4
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature tempSensor(&oneWire);
+
+void writeRegister(byte addr, byte reg, byte value)
 {
-  Serial.print("Mensagem recebida [");
-  Serial.print(topic);
-  Serial.print("]: ");
-
-  for (unsigned int i = 0; i < length; i++)
-  {
-    Serial.print((char)payload[i]);
-  }
-  Serial.println();
+  Wire.beginTransmission(addr);
+  Wire.write(reg);
+  Wire.write(value);
+  Wire.endTransmission();
 }
 
-void conectarWiFi()
+void reconnectMQTT()
 {
-  Serial.print("Conectando ao WiFi");
-  WiFi.begin(rede_wifi, senha);
-
-  while (WiFi.status() != WL_CONNECTED)
+  while (!client.connected())
   {
-    delay(500);
-    Serial.print(".");
-  }
-
-  Serial.println("\nWiFi conectado!");
-  Serial.print("IP do ESP: ");
-  Serial.println(WiFi.localIP());
-}
-
-void conectarMQTT()
-{
-  while (!cliente.connected())
-  {
-    Serial.print("Conectando ao Mosquitto... ");
-
-    if (cliente.connect(clientId))
+    if (client.connect("ESP8266_MOTOR_PREDITIVA"))
     {
-      Serial.println("conectado!");
-      cliente.subscribe(topico);
-      cliente.publish(topico, "ESP8266 conectado com sucesso!");
+      client.publish(topicStatus, "ESP8266 conectado - 200Hz ativo");
     }
     else
     {
-      Serial.print("falhou, rc=");
-      Serial.print(cliente.state());
-      Serial.println(" tentando novamente em 5 segundos");
-      delay(5000);
+      delay(1000);
     }
   }
 }
 
 void setup()
 {
-  Serial.begin(9600);
+  Serial.begin(115200);
   delay(2000);
 
-  Serial.println("\nIniciando ESP8266...");
+  Serial.println("\nInicializando sistema preditivo...");
 
-  conectarWiFi();
+  Wire.begin(D2, D1);
+  Wire.setClock(400000);
 
-  cliente.setServer(mosquitto_broker, mosquitto_port);
-  cliente.setCallback(callback);
+  tempSensor.begin();
 
-  conectarMQTT();
+  writeRegister(MMA8452_ADDR, 0x2A, 0x00);
+  writeRegister(MMA8452_ADDR, 0x0E, 0x00);
+  writeRegister(MMA8452_ADDR, 0x2A, 0x01);
+
+  WiFi.begin(ssid, password);
+  Serial.print("Conectando WiFi");
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    delay(300);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi conectado!");
+
+  client.setServer(mqtt_server, mqtt_port);
 }
 
 void loop()
 {
-  if (!cliente.connected())
-  {
-    conectarMQTT();
-  }
+  static unsigned long lastSample = 0;
+  const unsigned long interval = 5;
 
-  cliente.loop();
+  if (!client.connected())
+    reconnectMQTT();
+  client.loop();
 
-  static unsigned long ultimoEnvio = 0;
-  if (millis() - ultimoEnvio > 10000)
+  unsigned long now = micros();
+
+  if (now - lastSample >= interval * 1000)
   {
-    ultimoEnvio = millis();
-    cliente.publish(topico, "Temperatura: 25C");
+    lastSample = now;
+
+    static int tempCounter = 0;
+    static float temp = 0;
+
+    if (++tempCounter >= 200)
+    {
+      tempSensor.requestTemperatures();
+      temp = tempSensor.getTempCByIndex(0);
+      tempCounter = 0;
+    }
+
+    Wire.beginTransmission(MMA8452_ADDR);
+    Wire.write(0x01);
+    Wire.endTransmission(false);
+    Wire.requestFrom(MMA8452_ADDR, 6);
+
+    int16_t ax = (Wire.read() << 8 | Wire.read()) >> 4;
+    int16_t ay = (Wire.read() << 8 | Wire.read()) >> 4;
+    int16_t az = (Wire.read() << 8 | Wire.read()) >> 4;
+
+    char payload[128];
+    snprintf(payload, sizeof(payload),
+             "{\"temp\":%.2f,\"ax\":%d,\"ay\":%d,\"az\":%d}",
+             temp, ax, ay, az);
+
+    client.publish(topicSensores, payload);
+    Serial.println(payload);
   }
 }
